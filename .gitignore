@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# Heretic checkpoints (large, regenerable)
+checkpoints/
+
+# Saved model weights (very large)
+models/
+
+# Experiment results (regenerable, keep locally)
+experiments/
+
+# Eval prompt datasets (downloaded at runtime)
+prompts/
+
+# HF cache
+.cache/
+
+# Dashboard output (regenerable)
+dashboard.png
+
+# OS
+.DS_Store
