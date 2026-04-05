@@ -19,8 +19,8 @@ prompts/
 # HF cache
 .cache/
 
-# Dashboard output (regenerable)
-dashboard.png
+# Dashboard output (root dir only, assets/ copy is tracked)
+/dashboard.png
 
 # OS
 .DS_Store

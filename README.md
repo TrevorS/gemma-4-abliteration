@@ -13,6 +13,8 @@ Abliterated (uncensored) versions of Google's Gemma 4 model family using norm-pr
 
 Refusal rates measured across 686 prompts from 4 independent datasets (JailbreakBench, tulu-harmbench, NousResearch, mlabonne). Every flagged refusal was manually audited — most are refusal-then-comply false positives.
 
+![Experiment Results](assets/dashboard.png)
+
 ## Method
 
 **Dense models (E2B, E4B, 31B):** Norm-preserving biprojected abliteration. Per-layer refusal directions are computed from 800 harmful/harmless prompt residuals, orthogonalized against harmless means, and projected out of `o_proj` + `mlp.down_proj` weights while preserving row norms.
