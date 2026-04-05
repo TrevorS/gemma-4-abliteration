@@ -21,7 +21,7 @@ Refusal rates measured across 686 prompts from 4 independent datasets (Jailbreak
 
 **MoE model (26B-A4B):** Same as above on the dense pathway, plus Expert-Granular Abliteration (EGA) — hooks MoE routers to compute per-expert routing weights, then applies the same projection to each of the 128 expert `down_proj` slices per layer. Dense-only abliteration leaves 29/100 refusals; adding EGA drops it to 3/100.
 
-Based on [heretic](https://github.com/p-e-w/heretic) internals with custom extensions for biprojection, EGA, and evaluation.
+Built on [heretic](https://github.com/p-e-w/heretic). EGA concept from [OBLITERATUS](https://github.com/elder-plinius/OBLITERATUS). Biprojection from [grimjim](https://huggingface.co/blog/grimjim/abliteration-biprojection).
 
 ## Quick Start
 

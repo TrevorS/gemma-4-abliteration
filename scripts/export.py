@@ -234,10 +234,10 @@ def write_model_cards(model_key: str) -> None:
         method_section = """Norm-preserving biprojected abliteration on the dense pathway (o_proj + shared mlp.down_proj),
 plus **Expert-Granular Abliteration (EGA)** on all 128 MoE expert down_proj slices per layer.
 
-EGA hooks the MoE routers during probing to compute per-expert routing weights for harmful vs harmless
-prompts, then applies the same norm-preserving projection to each expert individually. This is necessary
-because MoE experts carry most of the refusal signal — dense-only abliteration leaves 29/100 refusals,
-adding EGA drops it to 3/100."""
+EGA ([OBLITERATUS](https://github.com/elder-plinius/OBLITERATUS)) hooks the MoE routers during probing
+to compute per-expert routing weights for harmful vs harmless prompts, then applies norm-preserving
+projection ([grimjim](https://huggingface.co/blog/grimjim/abliteration-biprojection)) to each expert
+individually. Dense-only abliteration leaves 29/100 refusals; adding EGA drops it to 3/100."""
     else:
         method_section = """Norm-preserving biprojected abliteration ([grimjim, Nov 2025](https://huggingface.co/blog/grimjim/abliteration-biprojection)).
 Each weight row is decomposed into magnitude + direction, the refusal direction is projected out of the
@@ -337,19 +337,13 @@ print(tokenizer.decode(outputs[0][inputs.shape[1]:], skip_special_tokens=True))
 
 ## Reproduction
 
-Full code and experiment data: [abliteration research repo](https://github.com/TrevorJS/gemma-4-abliteration)
+Full code and experiment data: [abliteration research repo](https://github.com/TrevorS/gemma-4-abliteration)
 
 ```bash
-# Dense models (E2B, E4B)
-python scripts/abliterate.py biprojection --model {config['hf_id']} \\
+python scripts/{'ega.py' if is_moe else 'abliterate.py biprojection'} --model {config['hf_id']} \\
   --top-pct 100 --strip-topic-markers --skip-prefix --batch-size 4 \\
-  --auto-save output_dir{'```' if not is_moe else ''}
-{'''
-# MoE model (26B-A4B) — uses EGA
-python scripts/ega.py --model ''' + config['hf_id'] + ''' \\
-  --strip-topic-markers --skip-prefix --no-eval --batch-size 4 \\
-  --save output_dir
-```''' if is_moe else ''}
+  --{'save' if is_moe else 'auto-save'} output_dir
+```
 """
     (bf16_dir(model_key) / "README.md").write_text(bf16_card)
 
@@ -391,10 +385,25 @@ GGUF quantizations of [{rid}](https://huggingface.co/{rid}).
 ## Usage
 
 ```bash
+# From HuggingFace (auto-downloads)
+llama-server -hf {grid} -c 8192
+
+# From local file
 llama-server -m {name}-Q4_K_M.gguf -c 8192
 ```
 
-See [{rid}](https://huggingface.co/{rid}) for method details.
+Then open http://localhost:8080 for the chat UI.
+
+## Details
+
+These are GGUF quantizations of [{rid}](https://huggingface.co/{rid}), an abliterated
+(uncensored) version of [{config['hf_id']}](https://huggingface.co/{config['hf_id']}).
+Refusal behavior has been removed using norm-preserving biprojected abliteration{' with Expert-Granular Abliteration (EGA) for MoE expert weights' if is_moe else ''}.
+
+See the [bf16 model card](https://huggingface.co/{rid}) for full method details,
+before/after refusal rates, and cross-dataset validation results.
+
+Source code: [TrevorJS/gemma-4-abliteration](https://github.com/TrevorS/gemma-4-abliteration)
 """
         (gd / "README.md").write_text(gguf_card)
 
