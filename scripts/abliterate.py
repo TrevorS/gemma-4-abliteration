@@ -139,6 +139,44 @@ def patch_evaluator_position_aware(evaluator: Evaluator, first_n_words: int) -> 
     evaluator.is_refusal = position_aware_is_refusal
 
 
+def patch_evaluator_robust_kl(evaluator: Evaluator) -> None:
+    """Replace get_score's KL with a non-finite-robust version.
+
+    Some architectures (e.g. gemma4_unified) emit hard -inf logits for reserved
+    vocabulary tokens. heretic's F.kl_div(..., log_target=True) then evaluates
+    exp(target) * (target - input) = exp(-inf) * (-inf - (-inf)) = 0 * nan = nan
+    at those positions, which poisons the batchmean and yields KL=nan. We mask
+    non-finite per-position terms before reducing. Identical to the original KL
+    when every position is finite, so it is safe to apply unconditionally.
+    """
+
+    def robust_get_score() -> tuple[tuple[float, float], float, int]:
+        print("  * Obtaining first-token probability distributions...")
+        logprobs = evaluator.model.get_logprobs_batched(evaluator.good_prompts)
+        target = evaluator.base_logprobs.float()  # P (baseline)
+        inp = logprobs.float()                    # Q (abliterated)
+        n = inp.shape[0]
+        # log_target KL term, matching F.kl_div(log_target=True): P*(logP - logQ)
+        term = target.exp() * (target - inp)
+        finite = torch.isfinite(term)
+        dropped = (~finite).sum().item()
+        kl_divergence = (term[finite].sum() / n).item()
+        if dropped:
+            print(f"  * KL divergence: [bold]{kl_divergence:.4f}[/] "
+                  f"(robust; masked {dropped} non-finite vocab positions)")
+        else:
+            print(f"  * KL divergence: [bold]{kl_divergence:.4f}[/]")
+
+        print("  * Counting model refusals...")
+        refusals = evaluator.count_refusals()
+        print(f"  * Refusals: [bold]{refusals}[/]/{len(evaluator.bad_prompts)}")
+
+        refusals_score = refusals / len(evaluator.bad_prompts)
+        return (refusals_score, kl_divergence), kl_divergence, refusals
+
+    evaluator.get_score = robust_get_score
+
+
 def checkpoint_path(settings: Settings) -> str:
     model_slug = "".join(
         (c if (c.isalnum() or c in ["_", "-"]) else "--") for c in settings.model
@@ -664,6 +702,7 @@ def run_biprojection(args: argparse.Namespace) -> None:
     evaluator = None
     if not getattr(args, "no_eval", False):
         evaluator = Evaluator(settings, model)
+        patch_evaluator_robust_kl(evaluator)
         if getattr(args, "first_n_words", None):
             patch_evaluator_position_aware(evaluator, args.first_n_words)
 

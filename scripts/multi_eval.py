@@ -150,6 +150,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Multi-dataset abliteration evaluation")
     parser.add_argument("--model", default="google/gemma-4-E2B-it")
     parser.add_argument("--results-dir", default="experiments")
+    parser.add_argument("--top-pct", type=float, default=100,
+                        help="Percent of layers to abliterate (must match the shipped model; "
+                             "12B Unified ships at 70, the rest at 100)")
     args = parser.parse_args()
 
     torch.set_grad_enabled(False)
@@ -215,15 +218,27 @@ def main() -> None:
                 rate = sum(results) / len(results)
                 console.print(f"    {cat}: {sum(results)}/{len(results)} ({rate*100:.0f}%)")
 
-    # --- Apply biprojection (best config: 100%, scale=1.0, winsorize=0.995) ---
-    console.print("\n[bold]Applying biprojection abliteration (100% layers)...[/]")
+    # --- Apply biprojection (scale=1.0, winsorize=0.995, top_pct from --top-pct) ---
+    console.print(f"\n[bold]Applying biprojection abliteration ({args.top_pct:g}% layers)...[/]")
 
     refusal_directions, good_means, bad_means = compute_refusal_directions(
         settings, model, good_prompts, bad_prompts, winsorize_quantile=0.995,
     )
 
     n_layers = len(model.get_layers())
-    selected_layers = list(range(n_layers))
+    if args.top_pct >= 100:
+        selected_layers = list(range(n_layers))
+    else:
+        # SNR layer quality, same selection as abliterate.py biprojection
+        qualities = []
+        for i in range(n_layers):
+            rd = refusal_directions[i + 1] if (i + 1) < refusal_directions.shape[0] else refusal_directions[i]
+            gm = good_means[i + 1] if (i + 1) < good_means.shape[0] else good_means[i]
+            bm = bad_means[i + 1] if (i + 1) < bad_means.shape[0] else bad_means[i]
+            qualities.append((i, compute_layer_quality(rd, bm, gm)))
+        qualities.sort(key=lambda x: x[1], reverse=True)
+        n_select = max(1, int(n_layers * args.top_pct / 100))
+        selected_layers = sorted([idx for idx, _ in qualities[:n_select]])
 
     # Orthogonalize
     for i in range(refusal_directions.shape[0]):
@@ -261,7 +276,7 @@ def main() -> None:
             if w is not None:
                 w.data = modify_weight_norm_preserved(w.data, r, 1.0)
 
-    console.print("  Applied to all layers")
+    console.print(f"  Applied to {len(selected_layers)}/{n_layers} layers")
 
     # --- Evaluate ABLITERATED ---
     console.print("\n[bold cyan]═══ ABLITERATED EVALUATION ═══[/]")
@@ -310,7 +325,7 @@ def main() -> None:
     output = {
         "model": args.model,
         "method": "biprojection",
-        "config": {"top_pct": 100, "scale": 1.0, "winsorize": 0.995},
+        "config": {"top_pct": args.top_pct, "scale": 1.0, "winsorize": 0.995},
         "strip_topic_markers": True,
         "baseline": baseline_results,
         "abliterated": abliterated_results,

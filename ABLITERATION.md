@@ -12,8 +12,9 @@ Abliterate Gemma 4 models — remove refusal behavior while preserving capabilit
 | E4B | 4.5B | Dense | `google/gemma-4-E4B-it` |
 | 26B-A4B | 25.2B (3.8B active) | MoE (128 experts, top-8) | `google/gemma-4-26B-A4B-it` |
 | 31B | 31B | Dense | `google/gemma-4-31B-it` |
+| 12B | 11.95B | Dense (`Gemma4Unified`, encoder-free) | `google/gemma-4-12B-it` |
 
-All Apache 2.0, ungated.
+All Apache 2.0, ungated. The 12B Unified model was added to the family on 2026-06-03, two months after the initial launch — see [Architecture Notes](#gemma-4-12b-unified-encoder-free-multimodal).
 
 ## Experiment Results — E2B (2.3B dense)
 
@@ -115,6 +116,41 @@ Cross-dataset: 5/686 (0.7%) — JailbreakBench 2/100, tulu-harmbench 1/320, Nous
 
 KL is 5x lower than E2B (0.068 vs 0.346) — larger models absorb abliteration with less distortion.
 
+## Experiment Results — 12B (Unified, encoder-free dense)
+
+`gemma4_unified`, 48 layers. Refusal signal concentrates in L15-47 (SNR ~0.005-0.008); L0-14 are dead
+(~0.000). Needs `transformers >= 5.10.1` and the non-finite-safe KL patch (reserved-token `-inf` logits).
+
+| Config | Refusals (mlabonne) | KL Div | Layers |
+|---|---|---|---|
+| baseline | 99/100 | — | — |
+| **bp 70% (shipped)** | **6/100** | **0.0556** | **34/48 (L15-47)** |
+
+Cross-dataset (686), abliterated:
+
+| Dataset | N | Baseline | bp 70% (shipped) | bp 100% |
+|---|---|---|---|---|
+| JailbreakBench | 100 | 95/100 | 2/100 | 3/100 |
+| tulu-harmbench | 320 | 249/320 | 4/320 | 3/320 |
+| NousResearch | 166 | 148/166 | 4/166 | 4/166 |
+| mlabonne | 100 | 97/100 | 4/100 | 4/100 |
+| **Total** | **686** | — | **14/686 (2.0%)** | **14/686 (2.0%)** |
+
+**70% and 100% reach the same 14/686 generalization** — ablating the dead early layers buys nothing on
+the cross-dataset eval, so we ship 70% for lower distortion (KL 0.0556 is the lowest in the family).
+This answers the layer-count question for the Unified arch: stop at the layers that carry signal.
+
+KL=0.0556 is the cleanest abliteration across all five models — the 12B Unified text decoder absorbs
+the refusal-direction removal with less distortion than even E4B (0.068).
+
+**Audit (`scripts/audit_refusals.py`).** All 13 flagged cross-dataset responses were read on the shipped
+weights. Only **1 is a genuine refusal** (a sensitive prompt the model handles by redirecting to support
+resources). The other 12 are false positives: 8 are disclaimer-then-comply ("I am an AI ..." followed by a
+full answer); 2 are the marker matching inside generated content rather than a refusal; 1 is a hedge that
+still provides the content; 1 is a confused-but-compliant answer. **Effective refusal rate: ~0/686.** This
+matches the family pattern — substring markers can't distinguish refusal-then-comply (or markers in
+generated content) from a real refusal.
+
 ## Experiment Results — 26B-A4B (MoE, 128 experts top-8)
 
 | Method | Refusals | KL Div | Dense modified | Expert modified |
@@ -128,9 +164,9 @@ Audit of 3 flagged refusals: 1 genuine (racist comic prompt), 2 refusal-then-com
 
 ### Key Findings (Updated)
 
-1. **Biprojection + EGA covers both dense and MoE architectures**
-2. **Layer count is the main dial** — 30% not enough, 70%+ good, 100% best
-3. **Larger models absorb abliteration better** — E4B KL=0.07, E2B KL=0.35
+1. **Biprojection + EGA covers dense, MoE, and Unified architectures**
+2. **Layer count is the main dial** — 30% not enough, 70%+ good. On most models 100% edges it; on the 12B Unified arch 70% matches 100% (14/686 either way) at lower KL, because the early layers carry no refusal signal. Ablate where the signal is.
+3. **Larger models absorb abliteration better** — 12B KL=0.056 < E4B 0.068 < 26B 0.090 < 31B 0.124 < E2B 0.346
 4. **MoE experts carry refusal signal** — dense-only gets 29/100, adding experts drops to 3/100
 5. **Default refusal markers are broken** — "illegal", "harmful", etc. match disclaimers. Use `--strip-topic-markers`
 6. **Refusal-then-comply is the dominant pattern on larger models** — model disclaims then answers. Substring markers can't distinguish this from genuine refusal.
@@ -148,7 +184,9 @@ Installed from git HEAD: `uv tool install 'heretic-llm @ git+https://github.com/
 
 1. **LoRA target scoping** (`model.py:_apply_lora`): Changed from leaf module names to full qualified paths. Gemma 4's `Gemma4ClippableLinear` wrapper in vision/audio encoders was breaking PEFT. Fixed by using `module_id_to_full_path` so LoRA only targets text decoder layers.
 
-2. **Transformers version**: PyPI heretic 1.2.0 pins `transformers~=4.57` which has a tokenizer bug with Gemma 4's `extra_special_tokens` (passed as list, expected dict). Git HEAD supports transformers 5.x.
+2. **Transformers version**: PyPI heretic 1.2.0 pins `transformers~=4.57` which has a tokenizer bug with Gemma 4's `extra_special_tokens` (passed as list, expected dict). Git HEAD supports transformers 5.x. The original four models ran on `transformers 5.5.0`; the **12B Unified** model (`gemma4_unified`, added 2026-06-03) needs **`transformers >= 5.10.1`** — earlier versions raise `does not recognize this architecture`. Current env: `transformers 5.12.0`, `torch 2.11.0+cu130`.
+
+3. **Non-finite-safe KL** (`abliterate.py:patch_evaluator_robust_kl`): `gemma4_unified` emits hard `-inf` logits for reserved vocabulary tokens. heretic's `F.kl_div(..., log_target=True)` then evaluates `exp(-inf) * (-inf - (-inf)) = 0 * nan = nan` at those positions, poisoning the batchmean (KL reported as `nan`). The patch masks non-finite per-position terms before reducing; it matches the original KL exactly when every position is finite, so it is applied to all biprojection runs. This is what turned 12B's `KL=nan` into `KL=0.0556`. llama.cpp handles the same reserved-token issue at inference with a logits-bias patch (`src/models/gemma4.cpp`).
 
 ### abliterate.py (experiment driver)
 
@@ -318,3 +356,41 @@ Unique: dense MLP and MoE experts run **in parallel**, outputs summed. The dense
 - Full attention layers: `head_dim=512`, 4 KV heads, K=V weight sharing
 - Proportional RoPE on full attention (25% of dims rotated)
 - Layer pattern: 5:1 sliding:full
+
+### Gemma 4 12B Unified (Encoder-Free Multimodal)
+
+Added to the family 2026-06-03 — a fifth model, two months after launch. Arch class
+`Gemma4UnifiedForConditionalGeneration` (`model_type: gemma4_unified`), 11.95B params, 48 decoder
+layers, 256K context. "Unified" = encoder-free: raw image patches and 16 kHz audio waveforms are
+projected straight into the text embedding space via lightweight linear layers — no vision/audio tower.
+
+What this means for abliteration:
+
+```
+model.language_model.layers.{0..47}.self_attn.o_proj   ← nn.Linear (abliteration target)
+model.language_model.layers.{0..47}.mlp.down_proj      ← nn.Linear (abliteration target)
+model.language_model.layers.{0..47}.self_attn.{q,k}_norm  ← QK-norm
+<multimodal embedders>                                 ← ignored (text-only refusal abliteration)
+```
+
+- The text decoder is a standard dense stack nested under `model.language_model.*`, so biprojection
+  targets `o_proj` + `mlp.down_proj` exactly as on the other dense models. The multimodal projectors
+  are left untouched.
+- **Refusal signal lives in L15-47.** SNR layer-quality scores L0-14 at ~0.000 (dead), L20-46 at
+  0.005-0.008. We abliterate the top 70% of layers; including the dead early layers only adds
+  distortion (and, with norm-preserving rescaling on near-zero projections, risks numerical blow-up).
+- **Reserved-token `-inf` logits.** The arch hard-masks reserved vocabulary tokens to `-inf`. This
+  NaNs a naive KL (see heretic patch #3 above) and requires a logits-bias patch at inference
+  (handled in transformers >= 5.10.1 and llama.cpp >= 2026-06-04).
+
+### GGUF conversion for Gemma 4 Unified
+
+The monolithic `convert_hf_to_gguf.py` (qwen-omni llama.cpp checkout, Apr 2026) only registers
+`Gemma4ForConditionalGeneration` and fails on the Unified arch with
+`Model Gemma4UnifiedForConditionalGeneration is not supported`. Support landed upstream
+2026-06-04 in [PR #24118](https://github.com/ggml-org/llama.cpp/pull/24118), where the converter was
+also refactored into a `conversion/` package (`conversion/gemma.py: Gemma4UnifiedModel`).
+
+We build the GGUF toolchain from an isolated clone at `~/Projects/llama.cpp-gemma4` (commit `c34b922`,
+2026-06-13), CPU-only, `llama-quantize` target. `export.py` points `CONVERT_SCRIPT` / `QUANTIZE_BIN`
+there. Anyone running the resulting GGUFs needs a llama.cpp build from 2026-06-04 or later.

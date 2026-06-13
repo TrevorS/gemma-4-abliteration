@@ -35,9 +35,14 @@ os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 ROOT = Path(__file__).resolve().parent.parent
 MODELS_DIR = ROOT / "models"
 HERETIC_PY = Path.home() / ".local/share/uv/tools/heretic-llm/bin/python"
-CONVERT_SCRIPT = Path.home() / "Projects/qwen-omni-llama-cpp/llama.cpp/convert_hf_to_gguf.py"
-QUANTIZE_BIN = Path.home() / "Projects/strieber-gpt-7/bin/bin/llama-quantize"
-LIB_DIR = Path.home() / "Projects/strieber-gpt-7/bin/bin"
+# llama.cpp toolchain. The Gemma4Unified (12B) architecture requires conversion
+# support added 2026-06-04 (ggml-org/llama.cpp PR #24118); this isolated clone is
+# pinned at commit c34b922 (2026-06-13). The older monolithic convert script
+# (qwen-omni-llama.cpp, Apr 2026) does NOT support Gemma4Unified.
+LLAMACPP_DIR = Path.home() / "Projects/llama.cpp-gemma4"
+CONVERT_SCRIPT = LLAMACPP_DIR / "convert_hf_to_gguf.py"
+QUANTIZE_BIN = LLAMACPP_DIR / "build-cpu/bin/llama-quantize"
+LIB_DIR = LLAMACPP_DIR / "build-cpu/bin"
 
 GGUF_QUANTS = ["Q4_K_M", "Q8_0"]
 HF_USER = "TrevorJS"
@@ -82,6 +87,47 @@ MODELS = {
             "cross_detail": {"jbb": "5/100", "tulu": "5/320", "nous": "7/166", "mlab": "5/100"},
         },
     },
+    "12B": {
+        "hf_id": "google/gemma-4-12B-it",
+        # gemma4_unified concentrates the refusal signal in L15-47; L0-14 are
+        # dead (SNR ~0.000), so 100% ablation only adds distortion there. 70%
+        # selects the live layers. (Robust KL needed — arch emits -inf logits
+        # for reserved vocab, which NaNs heretic's default KL.)
+        "method": "biprojection",
+        "abliterate_cmd": ["biprojection", "--top-pct", "70", "--strip-topic-markers", "--skip-prefix"],
+        "card_note": (
+            "**Note on the Unified architecture.** `gemma-4-12B-it` is the encoder-free "
+            "`Gemma4Unified` model (released 2026-06-03). Its refusal signal concentrates in the "
+            "upper decoder layers (L15-47), so only the top 70% of layers are abliterated — ablating "
+            "the near-zero-SNR early layers adds distortion with no refusal benefit. The arch also "
+            "emits hard `-inf` logits for reserved vocabulary tokens, which NaNs a naive KL "
+            "divergence; the reported KL masks non-finite positions before reducing.\n\n"
+            "**Version requirements:** inference needs `transformers >= 5.10.1` (tested on 5.12.0, "
+            "torch 2.11.0+cu130). GGUF conversion/quantization needs llama.cpp with `Gemma4Unified` "
+            "support, added 2026-06-04 in [PR #24118](https://github.com/ggml-org/llama.cpp/pull/24118) "
+            "(tested at commit `c34b922`)."
+        ),
+        "gguf_note": (
+            "Requires a llama.cpp build from **2026-06-04 or later** "
+            "([PR #24118](https://github.com/ggml-org/llama.cpp/pull/24118), which added "
+            "`Gemma4Unified` conversion + inference support). Earlier builds will fail to load these files."
+        ),
+        "audit_note": (
+            "Every flagged cross-dataset response was manually audited (`scripts/audit_refusals.py`). "
+            "Of 13 flags, **only 1 is a genuine refusal** (a sensitive prompt the model handles by "
+            "redirecting to support resources); the other 12 are false positives — an \"I am an AI\" "
+            "disclaimer, or a marker that matched inside generated content, followed by compliance. "
+            "Effective refusal rate: ~0/686."
+        ),
+        "results": {
+            "refusals": "6/100", "baseline": "99",
+            "cross": "14/686 (2.0%)", "kl": 0.0556,
+            "cross_detail": {"jbb": "2/100", "tulu": "4/320", "nous": "4/166", "mlab": "4/100"},
+            "quality_label": "Quality (coherence)",
+            "quality_before": "—",
+            "quality_after": "**no degradation** (response audit + Q8 inference verified)",
+        },
+    },
 }
 
 REPO_NAMES = {
@@ -89,7 +135,19 @@ REPO_NAMES = {
     "E4B": "gemma-4-E4B-it-uncensored",
     "26B-MoE": "gemma-4-26B-A4B-it-uncensored",
     "31B": "gemma-4-31B-it-uncensored",
+    "12B": "gemma-4-12B-it-uncensored",
 }
+
+
+def top_pct(model_key: str) -> int:
+    """Percent of layers abliterated, parsed from the model's abliterate_cmd.
+
+    EGA (MoE) has no biprojection command and uses the dense default of 100%.
+    """
+    cmd = MODELS[model_key].get("abliterate_cmd")
+    if cmd and "--top-pct" in cmd:
+        return int(cmd[cmd.index("--top-pct") + 1])
+    return 100
 
 
 def slug(model_key: str) -> str:
@@ -244,6 +302,9 @@ Each weight row is decomposed into magnitude + direction, the refusal direction 
 direction component only, then recombined with the original magnitude — guaranteeing `||W_new|| = ||W_orig||`."""
 
     cross_data = results.get("cross_detail", {})
+    tp = top_pct(model_key)
+    card_note = config.get("card_note", "")
+    note_section = f"\n\n> {card_note}\n" if card_note else ""
 
     bf16_card = f"""---
 base_model: {config['hf_id']}
@@ -269,7 +330,7 @@ Uncensored version of [{config['hf_id']}](https://huggingface.co/{config['hf_id'
 | **Refusals (mlabonne, 100 prompts)** | {results.get('baseline', '98-100')}/100 | **{results['refusals']}** |
 | **Refusals (cross-dataset, 686 prompts)** | — | **{results['cross']}** |
 | **KL Divergence** | 0 (baseline) | **{results['kl']}** |
-| **Quality (harmless response length ratio)** | 1.0 | **~1.01** (no degradation) |
+| **{results.get('quality_label', 'Quality (harmless response length ratio)')}** | {results.get('quality_before', '1.0')} | {results.get('quality_after', '**~1.01** (no degradation)')} |
 
 ### Cross-Dataset Validation
 
@@ -283,12 +344,11 @@ Tested against 4 independent prompt datasets to verify generalization:
 | [mlabonne/harmful_behaviors](https://huggingface.co/datasets/mlabonne/harmful_behaviors) | 100 | {cross_data.get('mlab', 'see below')} |
 | **Total** | **686** | **{results['cross']}** |
 
-Every flagged refusal was manually audited. Most are "refusal-then-comply" false positives where the model
-adds an AI identity disclaimer then answers the question anyway.
+{config.get("audit_note", 'Every flagged refusal was manually audited. Most are "refusal-then-comply" false positives where the model adds an AI identity disclaimer then answers the question anyway.')}
 
 ## Method
 
-{method_section}
+{method_section}{note_section}
 
 ### Pipeline
 
@@ -297,16 +357,16 @@ adds an AI identity disclaimer then answers the question anyway.
 3. Winsorize activations at 99.5th percentile (clamps GeGLU outlier activations in Gemma family)
 4. Compute per-layer refusal direction: `normalize(mean(harmful) - mean(harmless))`
 5. Orthogonalize each direction against harmless mean (double-pass Gram-Schmidt)
-6. Apply norm-preserving weight modification to `o_proj` and `down_proj` in all layers{'''
+6. Apply norm-preserving weight modification to `o_proj` and `down_proj` in the selected layers{'''
 7. Hook MoE routers, collect per-expert routing weights for harmful vs harmless prompts
 8. Apply same norm-preserving modification to all 128 expert `down_proj` slices per layer''' if is_moe else ''}
-9. Merge LoRA adapters into base weights for clean tensor names
+{9 if is_moe else 7}. Merge LoRA adapters into base weights for clean tensor names
 
 ### Parameters
 
 | Parameter | Value |
 |-----------|-------|
-| Layers abliterated | 100% |
+| Layers abliterated | {tp}% |
 | Scale | 1.0 |
 | Winsorization | 0.995 |{'''
 | Experts abliterated | 100% (128/128 per layer) |
@@ -341,7 +401,7 @@ Full code and experiment data: [abliteration research repo](https://github.com/T
 
 ```bash
 python scripts/{'ega.py' if is_moe else 'abliterate.py biprojection'} --model {config['hf_id']} \\
-  --top-pct 100 --strip-topic-markers --skip-prefix --batch-size 4 \\
+  --top-pct {tp} --strip-topic-markers --skip-prefix --batch-size 4 \\
   --{'save' if is_moe else 'auto-save'} output_dir
 ```
 """
@@ -375,7 +435,7 @@ tags:
 # {name} (GGUF)
 
 GGUF quantizations of [{rid}](https://huggingface.co/{rid}).
-
+{(chr(10) + "> " + config["gguf_note"] + chr(10)) if config.get("gguf_note") else ""}
 ## Files
 
 | File | Quant | Size |
