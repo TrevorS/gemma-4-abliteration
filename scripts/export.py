@@ -294,10 +294,10 @@ plus **Expert-Granular Abliteration (EGA)** on all 128 MoE expert down_proj slic
 
 EGA ([OBLITERATUS](https://github.com/elder-plinius/OBLITERATUS)) hooks the MoE routers during probing
 to compute per-expert routing weights for harmful vs harmless prompts, then applies norm-preserving
-projection ([grimjim](https://huggingface.co/blog/grimjim/abliteration-biprojection)) to each expert
+projection ([grimjim](https://huggingface.co/blog/grimjim/norm-preserving-biprojected-abliteration)) to each expert
 individually. Dense-only abliteration leaves 29/100 refusals; adding EGA drops it to 3/100."""
     else:
-        method_section = """Norm-preserving biprojected abliteration ([grimjim, Nov 2025](https://huggingface.co/blog/grimjim/abliteration-biprojection)).
+        method_section = """Norm-preserving biprojected abliteration ([grimjim, Nov 2025](https://huggingface.co/blog/grimjim/norm-preserving-biprojected-abliteration)).
 Each weight row is decomposed into magnitude + direction, the refusal direction is projected out of the
 direction component only, then recombined with the original magnitude — guaranteeing `||W_new|| = ||W_orig||`."""
 
